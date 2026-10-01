@@ -1,4 +1,4 @@
-"""FastAPI entrypoint:  uvicorn structurer.main:app --host 127.0.0.1 --port 8000 --workers 1"""
+"""FastAPI entrypoint:  uvicorn structurer.main:app --host 127.0.0.1 --port 8089 --workers 1"""
 from contextlib import asynccontextmanager
 
 import httpx
