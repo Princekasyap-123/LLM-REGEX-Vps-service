@@ -1,0 +1,15 @@
+[Unit]
+Description=ATS Structurer (rule parser + Ollama + DB API)
+After=network.target
+
+[Service]
+User=www-data
+WorkingDirectory=/opt/ats-structurer
+EnvironmentFile=/opt/ats-structurer/.env
+# --workers 1 zaroori hai: key pool, token aur job-claim ek hi process ki memory mein hain
+ExecStart=/opt/ats-structurer/venv/bin/uvicorn structurer.main:app --host 127.0.0.1 --port 8000 --workers 1
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,26 @@
+<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ATS Structurer</title>
+<style>
+ body{font:13px monospace;background:#111;color:#ddd;margin:14px}
+ pre{white-space:pre-wrap;background:#000;padding:8px;max-height:38vh;overflow:auto}
+ #l{max-height:52vh}
+</style>
+<h3>ATS Structurer dashboard</h3>
+<pre id="s">loading...</pre>
+<pre id="l"></pre>
+<script>
+let key = sessionStorage.getItem("k") || prompt("API key");
+sessionStorage.setItem("k", key);
+async function g(u){
+  const r = await fetch(u, {headers: {"x-api-key": key}});
+  if (r.status == 401) { sessionStorage.removeItem("k"); location.reload(); }
+  return r;
+}
+async function tick(){
+  document.getElementById("s").textContent = JSON.stringify(await (await g("/stats")).json(), null, 2);
+  const el = document.getElementById("l");
+  el.textContent = await (await g("/logs?lines=200")).text();
+  el.scrollTop = el.scrollHeight;
+}
+tick(); setInterval(tick, 5000);
+</script>

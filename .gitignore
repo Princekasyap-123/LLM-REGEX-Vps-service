@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+
+# Environment
+.env
+.venv/
+venv/
+
+# Credentials (NEVER commit)
+credentials/*.json
+credentials/new.txt
+
+# IDE
+.vscode/
+.idea/
+frontend/
+db.sqlite3
