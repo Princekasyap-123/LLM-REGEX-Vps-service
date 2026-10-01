@@ -84,3 +84,12 @@ def test_header_format_samples():
     d, _ = parse_shine(clean_for_llm(sample("bharath.txt")))
     assert [e["year"] for e in d["educations"]] == ["2018", "2016"]
     assert d["highestQualification"].startswith("Master of Business Administration")
+
+
+def test_env_inline_comments_ignored(monkeypatch):
+    from structurer import config
+    monkeypatch.setenv("X_INT", "1      # payload ka createdBy")
+    monkeypatch.setenv("X_BOOL", "0   # off")
+    monkeypatch.setenv("X_STR", "abc#nospace")
+    assert config._int("X_INT", 5) == 1 and config._bool("X_BOOL", True) is False
+    assert config._get("X_STR") == "abc#nospace"

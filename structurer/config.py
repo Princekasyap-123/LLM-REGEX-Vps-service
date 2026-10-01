@@ -1,5 +1,6 @@
 """Saari settings yahin se aati hain (environment ya .env file)."""
 import os
+import re
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -7,23 +8,32 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 
+def _env(name, default, strip=True):
+    """systemd EnvironmentFile inline '# comment' nahi hatata (python-dotenv hatata hai) -> yahin hata do."""
+    v = os.getenv(name)
+    if v is None:
+        return default
+    v = re.sub(r"\s+#.*$", "", v)
+    return v.strip() if strip else v
+
+
 def _get(name, default="", required=False):
-    v = os.getenv(name, default)
+    v = _env(name, default)
     if required and not v:
         raise RuntimeError(f"Missing required env var: {name}")
     return v
 
 
 def _int(name, default):
-    return int(os.getenv(name, str(default)))
+    return int(_env(name, str(default)))
 
 
 def _float(name, default):
-    return float(os.getenv(name, str(default)))
+    return float(_env(name, str(default)))
 
 
 def _bool(name, default):
-    return os.getenv(name, "1" if default else "0").strip().lower() in ("1", "true", "yes")
+    return _env(name, "1" if default else "0").lower() in ("1", "true", "yes")
 
 
 # ---- service ----
@@ -55,7 +65,7 @@ SENIORS_PASS_FIELD = _get("SENIORS_PASS_FIELD", "password")
 SENIORS_TOKEN_PATH = _get("SENIORS_TOKEN_PATH", "token")
 SENIORS_TOKEN = _get("SENIORS_TOKEN", "")
 SENIORS_AUTH_HEADER = _get("SENIORS_AUTH_HEADER", "Authorization")
-SENIORS_AUTH_PREFIX = _get("SENIORS_AUTH_PREFIX", "Bearer ").strip('"')
+SENIORS_AUTH_PREFIX = _env("SENIORS_AUTH_PREFIX", "Bearer ", strip=False).strip('"')   # trailing space zaroori
 
 # ---- database API: duplicate check ----
 DUPLICATE_CHECK_API_URL = _get("DUPLICATE_CHECK_API_URL", "")   # public, no auth
