@@ -12,6 +12,10 @@ class ApiError(Exception):
     """DB API se baat nahi ho paayi / usne reject kiya."""
 
 
+class AlreadyExists(ApiError):
+    """Save API ne kaha 'User Already Exists' -> retry nahi, already_parsed maano."""
+
+
 def dig(obj, path):
     for p in path.split("."):
         obj = obj.get(p) if isinstance(obj, dict) else None
@@ -65,32 +69,38 @@ def to_list(v):
 
 
 def to_payload(d, portal, created_by=None):
-    """Structured candidate -> White Force store-candidate-data-from-chrome-extention payload."""
+    """Structured candidate -> storeCandidateFromChromeExtention (Laravel) ka payload.
+    Controller top-level se created_by / email / mobile / domain padhta hai aur baaki
+    $data['data'] se (snake_case). Poora $data resume_parser_json mein bhi save hota hai."""
+    phone = d.get("mobile") or d.get("phone")
     return {
-        "createdBy": config.SAVE_CREATED_BY,            # hamesha 1 (client ke createdBy ko ignore)
-        "portal": portal,
-        "name": d.get("name"), "email": d.get("email"), "phone": d.get("phone"),
-        "gender": d.get("gender"), "dateOfBirth": d.get("dateOfBirth"),
-        "currentLocation": d.get("currentLocation"),
-        "preferredLocation": to_list(d.get("preferredLocation")),
-        "currentDesignation": d.get("currentDesignation"),
-        "currentCompany": d.get("currentCompany"),
-        "currentSalary": salary_to_number(d.get("currentSalary")),
-        "expectedSalary": salary_to_number(d.get("expectedSalary")),
-        "totalExperience": experience_to_number(d.get("totalExperience")),
-        "noticePeriod": d.get("noticePeriod"),
-        "profileSummary": d.get("profileSummary"),
-        "highestQualification": d.get("highestQualification"),
-        "highestQualificationYear": to_year(d.get("highestQualificationYear")),
-        "skills": d.get("skills") or [],
-        "educations": [{"educationTitle": e.get("degree"), "educationInstitute": e.get("institute"),
-                        "startYear": None, "endYear": to_year(e.get("year"))}
-                       for e in d.get("educations") or []],
-        "experiences": [{"designation": e.get("designation"), "company": e.get("company"),
-                         "startDate": None, "endDate": None, "description": None}
-                        for e in d.get("experiences") or []],
-        "certificates": d.get("certificates") or [],
-        "mobile": d.get("mobile") or d.get("phone"),
+        "created_by": config.SAVE_CREATED_BY,           # hamesha 1 (client ke createdBy ko ignore)
+        "email": d.get("email"), "mobile": phone,
+        "domain": portal, "imgSrc": None,
+        "data": {
+            "name": d.get("name"), "email": d.get("email"), "mobile": phone, "phone": phone,
+            "gender": d.get("gender"), "dob": d.get("dateOfBirth"),
+            "total_experience": experience_to_number(d.get("totalExperience")),
+            "current_location": d.get("currentLocation"),
+            "preferred_location": to_list(d.get("preferredLocation")),
+            "current_salary": salary_to_number(d.get("currentSalary")),
+            "expected_salary": salary_to_number(d.get("expectedSalary")),
+            "notice_period": d.get("noticePeriod"),
+            "functional_area": d.get("currentDesignation"),      # controller isse current_title banata hai
+            "current_designation": d.get("currentDesignation"),
+            "current_company": d.get("currentCompany"),
+            "highest_qualification": d.get("highestQualification"),
+            "highestQualification_year": to_year(d.get("highestQualificationYear")),
+            "skills": d.get("skills") or [],
+            "profile_summary": d.get("profileSummary"),
+            "educations": [{"educationTitle": e.get("degree"), "educationInstitute": e.get("institute"),
+                            "startYear": None, "endYear": to_year(e.get("year"))}
+                           for e in d.get("educations") or []],
+            "experiences": [{"designation": e.get("designation"), "company": e.get("company"),
+                             "startDate": None, "endDate": None, "description": None}
+                            for e in d.get("experiences") or []],
+            "certificates": d.get("certificates") or [],
+        },
     }
 
 
@@ -188,6 +198,8 @@ class DbApi:
         # 2xx chahiye; body mein status/success False ho to reject (jawab ka format pakka nahi pata)
         flags = [j.get(k) for k in ("status", "success") if isinstance(j, dict) and k in j]
         if not 200 <= r.status_code < 300 or any(f in (False, "error", "failed", "fail") for f in flags):
+            if "already exists" in str(j).lower():
+                raise AlreadyExists(f"DB API: {str(j)[:200]}")
             raise ApiError(f"DB API rejected: {r.status_code} {str(j)[:300]}")
         return j if isinstance(j, dict) else {"data": j}
 

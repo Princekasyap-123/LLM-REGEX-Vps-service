@@ -6,7 +6,7 @@ import json
 import httpx
 
 from . import config, store
-from .dbapi import ApiError, api, to_payload
+from .dbapi import AlreadyExists, ApiError, api, to_payload
 from .logging_setup import log, mask
 from .ollama_pool import NoKeyAvailable, llm_structure
 from .parsing import (clean_for_llm, extract_email, extract_phone, norm, parse_shine)
@@ -129,11 +129,23 @@ async def process(job, client):
         log.info("%s parsed, held (SENIORS_URL not set)", tag)
         return
 
+    if not data.get("phone"):                         # save API ko mobile chahiye ("Mobile can not be empty")
+        store.set_job(jid, status="skipped", error="no phone: save API needs mobile", raw_text=None)
+        log.warning("%s skipped: no phone number, save API requires mobile", tag)
+        return
+
     payload = to_payload(data, job["portal"], job["created_by"])
     if config.LOG_PAYLOAD:
         log.info("%s SAVE PAYLOAD (via=%s) ->\n%s", tag, via,
                  json.dumps(payload, indent=2, ensure_ascii=False))
-    resp = await api.save(client, payload, tag)
+    try:
+        resp = await api.save(client, payload, tag)
+    except AlreadyExists as e:                        # DB mein pehle se hai (race): retry mat karo
+        store.set_job(jid, status="already_parsed", error=None, raw_text=None)
+        for k in _keys(data.get("phone"), data.get("email")):
+            store.seen_add(k, "db_api")
+        log.info("%s already in DB (save API: %s) -> marked already_parsed", tag, e)
+        return
     if config.LOG_PAYLOAD:
         log.info("%s SAVE RESPONSE <- %s", tag, json.dumps(resp, ensure_ascii=False)[:1000])
     store.set_job(jid, status="done", db_response=json.dumps(resp)[:2000], error=None)

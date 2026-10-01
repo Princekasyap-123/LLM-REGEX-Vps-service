@@ -34,7 +34,7 @@ class FakeDb:
             self.fail_save -= 1
             raise ApiError("DB API rejected: 500 boom")
         self.saved.append(payload)
-        self.known.add(payload["phone"])
+        self.known.add(payload["mobile"])
         return {"status": True, "data": {"id": 1000 + len(self.saved)}}
 
 
@@ -73,15 +73,14 @@ def test_new_candidate_parsed_and_saved(fake):
     job = store.rows("SELECT * FROM jobs WHERE id=?", (jid,))[0]
     assert job["status"] == "done" and job["via"] == "parser" and job["key_used"] is None
     saved = fake.saved[0]
-    assert saved["mobile"] == saved["phone"] == "9999368246" and saved["portal"] == "recruiter.shine.com"
-    assert saved["createdBy"] == 1
-    assert saved["name"] == "Ritesh Rathi" and saved["currentLocation"] == "Delhi"
-    assert saved["currentSalary"] == 420000 and saved["totalExperience"] == 6
-    assert saved["preferredLocation"] == ["Gurugram", "Delhi"]
-    assert saved["educations"][0] == {"educationTitle": "10+2 or Below (Arts and Humanities)",
-                                      "educationInstitute": "Delhi University - Other",
-                                      "startYear": None, "endYear": 2014}
-    assert saved["highestQualificationYear"] == 2014
+    assert saved["mobile"] == "9999368246" and saved["domain"] == "recruiter.shine.com"
+    assert saved["created_by"] == 1 and "createdBy" not in saved
+    d = saved["data"]
+    assert d["name"] == "Ritesh Rathi" and d["current_location"] == "Delhi"
+    assert d["current_salary"] == 420000 and d["total_experience"] == 6
+    assert d["preferred_location"] == ["Gurugram", "Delhi"]
+    assert d["functional_area"] == "Business Development Manager"
+    assert d["educations"][0]["endYear"] == 2014 and d["highestQualification_year"] == 2014
     assert store.seen_has("9999368246")            # ab local cache se bhi pata chalega
 
 
@@ -176,7 +175,7 @@ def test_http_end_to_end(fake):
         assert client.post("/submit", json={"text": "x"}).status_code == 401
         r = client.post("/check", json={"phone": "+91 99993 68246"}, headers=hdr)
         assert r.json()["status"] == "new"
-        r = client.post("/submit", json={"text": sample("mohammed.txt"), "portal": "recruiter.shine.com",
+        r = client.post("/submit", json={"text": sample("divay.txt"), "portal": "recruiter.shine.com",
                                          "createdBy": 1}, headers=hdr)
         assert r.status_code == 202
         jid = r.json()["id"]
@@ -196,3 +195,30 @@ def test_http_end_to_end(fake):
                             "message": "Candidate already parsed"}
         r = client.post("/submit", json={"text": sample("ritesh.txt")}, headers=hdr)
         assert r.status_code == 200 and r.json()["status"] == "already_parsed"
+
+
+def test_save_says_already_exists_marks_already_parsed(fake):
+    from structurer.dbapi import AlreadyExists
+    async def exists_raises(client, payload, tag):
+        raise AlreadyExists("User Already Exists")
+    api_save = api.save
+    api.save = exists_raises
+    try:
+        async def go():
+            async with httpx.AsyncClient() as c:
+                await pipeline.submit_candidate(c, sample("ritesh.txt"), "recruiter.shine.com", 1)
+                await pipeline.process(store.claim_job(), c)
+        run(go())
+    finally:
+        api.save = api_save
+    assert store.rows("SELECT status FROM jobs")[0]["status"] == "already_parsed"
+    assert store.seen_has("9999368246")
+
+
+def test_no_phone_is_skipped_not_sent(fake):
+    async def go():
+        async with httpx.AsyncClient() as c:
+            await pipeline.submit_candidate(c, sample("mohammed.txt"), "recruiter.shine.com", 1)
+            await pipeline.process(store.claim_job(), c)
+    run(go())
+    assert store.rows("SELECT status FROM jobs")[0]["status"] == "skipped" and fake.saved == []

@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from structurer import config
-from structurer.dbapi import ApiError, DbApi
+from structurer.dbapi import AlreadyExists, ApiError, DbApi
 
 
 def make_server(state):
@@ -104,7 +104,22 @@ def test_payload_matches_white_force_shape():
     p = to_payload({"name": "A", "phone": "9810681616", "preferredLocation": "Noida, Delhi",
                     "currentSalary": "Rs. 24 Lacs", "totalExperience": "12 Yrs 0 Month",
                     "highestQualificationYear": None, "skills": ["x"]}, "recruiter.shine.com", 99)
-    assert p["createdBy"] == 1 and p["mobile"] == "9810681616" and p["email"] is None
-    assert p["preferredLocation"] == ["Noida", "Delhi"] and p["currentSalary"] == 2400000
-    assert p["totalExperience"] == 12 and p["highestQualificationYear"] is None
-    assert p["certificates"] == [] and p["educations"] == [] and "data" not in p
+    assert p["created_by"] == 1 and p["mobile"] == "9810681616" and p["email"] is None
+    assert p["domain"] == "recruiter.shine.com" and "createdBy" not in p
+    d = p["data"]
+    assert d["preferred_location"] == ["Noida", "Delhi"] and d["current_salary"] == 2400000
+    assert d["total_experience"] == 12 and d["highestQualification_year"] is None
+    assert d["certificates"] == [] and d["educations"] == []
+
+
+def test_save_already_exists_raises_special_error():
+    from structurer.dbapi import AlreadyExists
+    def handler(r):
+        return httpx.Response(200, json={"status": False, "message": "User Already Exists"})
+    async def go():
+        api = DbApi()
+        api.token = "t"
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            await api.save(c, {"x": 1}, "t")
+    with pytest.raises(AlreadyExists):
+        asyncio.run(go())
