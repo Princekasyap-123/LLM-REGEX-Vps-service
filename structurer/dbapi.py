@@ -1,6 +1,8 @@
 """Database API client: auto-login, duplicate check by phone, candidate save."""
 import asyncio
+import random
 import re
+import time
 
 import httpx
 
@@ -70,11 +72,12 @@ def to_list(v):
 
 def to_payload(d, portal, created_by=None):
     """Structured candidate -> storeCandidateFromChromeExtention (Laravel) ka payload.
-    Controller top-level se created_by / email / mobile / domain padhta hai aur baaki
+    Controller top-level se created_by / name / email / mobile / domain padhta hai aur baaki
     $data['data'] se (snake_case). Poora $data resume_parser_json mein bhi save hota hai."""
     phone = d.get("mobile") or d.get("phone")
     return {
         "created_by": config.SAVE_CREATED_BY,           # hamesha 1 (client ke createdBy ko ignore)
+        "name": d.get("name"),                          # FIX: top-level name (backend yahin se padhta hai)
         "email": d.get("email"), "mobile": phone,
         "domain": portal, "imgSrc": None,
         "data": {
@@ -104,10 +107,45 @@ def to_payload(d, portal, created_by=None):
     }
 
 
+def _retry_after(r):
+    """Retry-After header (seconds) -> float, warna None. Max 120s."""
+    try:
+        return min(120.0, float(r.headers.get("Retry-After")))
+    except (TypeError, ValueError):
+        return None
+
+
 class DbApi:
     def __init__(self):
         self.token = config.SENIORS_TOKEN or None
         self.login_lock = asyncio.Lock()
+        self.gate = asyncio.Semaphore(config.API_MAX_CONCURRENCY)   # ek saath kitne API calls
+        self.pace_lock = asyncio.Lock()
+        self.next_slot = 0.0
+
+    async def _pace(self):
+        """Do API calls ke beech kam se kam API_MIN_INTERVAL seconds ka gap (saare workers + /submit milakar)."""
+        async with self.pace_lock:
+            now = time.monotonic()
+            start = max(now, self.next_slot)
+            self.next_slot = start + config.API_MIN_INTERVAL
+        if start > now:
+            await asyncio.sleep(start - now)
+
+    async def _send(self, client, method, url, tag, **kw):
+        """Throttled HTTP call. 429 aaye to Retry-After (ya exponential backoff) ke baad dobara try."""
+        r = None
+        for attempt in range(1, config.API_429_RETRIES + 2):
+            async with self.gate:
+                await self._pace()
+                r = await client.request(method, url, **kw)
+            if r.status_code != 429 or attempt > config.API_429_RETRIES:
+                return r
+            wait = _retry_after(r) or min(60, 2 ** attempt) + random.random()
+            log.warning("%s API 429 on %s (attempt %d/%d) -> waiting %.1fs", tag, url.split("?")[0],
+                        attempt, config.API_429_RETRIES + 1, wait)
+            await asyncio.sleep(wait)
+        return r
 
     def _headers(self):
         h = {"Content-Type": "application/json"}
@@ -147,9 +185,9 @@ class DbApi:
             used = self.token
             try:
                 if method == "GET":
-                    r = await client.request("GET", url, params=payload, headers=self._headers())
+                    r = await self._send(client, "GET", url, tag, params=payload, headers=self._headers())
                 else:
-                    r = await client.request(method, url, json=payload, headers=self._headers())
+                    r = await self._send(client, method, url, tag, json=payload, headers=self._headers())
             except (httpx.TimeoutException, httpx.TransportError) as e:
                 raise ApiError(f"network: {e}")
             if r.status_code in (401, 403) and attempt == 1:
@@ -174,10 +212,12 @@ class DbApi:
         if email:
             payload["email"] = email
         try:
-            r = await client.post(config.DUPLICATE_CHECK_API_URL, json=payload,
-                                  timeout=config.DUPLICATE_CHECK_TIMEOUT)
+            r = await self._send(client, "POST", config.DUPLICATE_CHECK_API_URL, tag, json=payload,
+                                 timeout=config.DUPLICATE_CHECK_TIMEOUT)
         except (httpx.TimeoutException, httpx.TransportError) as e:
             raise ApiError(f"check API network: {e}")
+        if r.status_code == 429:
+            raise ApiError("check API rate limited (429) even after retries")
         if r.status_code >= 500:
             raise ApiError(f"check API {r.status_code}: {r.text[:200]}")
         try:
@@ -191,6 +231,8 @@ class DbApi:
 
     async def save(self, client, payload, tag):
         r = await self.request(client, "POST", config.SENIORS_URL, payload, tag)
+        if r.status_code == 429:
+            raise ApiError("save API rate limited (429) even after retries")
         try:
             j = r.json()
         except Exception:

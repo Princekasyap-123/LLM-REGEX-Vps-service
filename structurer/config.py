@@ -73,6 +73,11 @@ DUPLICATE_CHECK_TIMEOUT = _float("DUPLICATE_CHECK_TIMEOUT", 8)
 CHECK_FAIL_OPEN = _bool("CHECK_FAIL_OPEN", False)
 REQUIRE_PHONE = _bool("REQUIRE_PHONE", False)
 
+# ---- database API: throttling (429 se bachne ke liye; check + save + login sab par lagu) ----
+API_MAX_CONCURRENCY = _int("API_MAX_CONCURRENCY", 2)      # ek saath max itne API calls
+API_MIN_INTERVAL = _float("API_MIN_INTERVAL", 0.3)        # do API calls ke beech min gap (seconds)
+API_429_RETRIES = _int("API_429_RETRIES", 3)              # 429 par call ke andar hi itni baar dobara try
+
 # ---- pipeline tuning ----
 WORKERS = _int("WORKERS", 4)
 MAX_ATTEMPTS = _int("MAX_ATTEMPTS", 4)
