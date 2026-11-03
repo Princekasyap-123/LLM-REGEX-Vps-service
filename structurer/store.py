@@ -28,6 +28,7 @@ def init(path=None):
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     _db = sqlite3.connect(path, check_same_thread=False)
     _db.execute("PRAGMA journal_mode=WAL")
+    _db.execute("PRAGMA synchronous=NORMAL")      # WAL mein safe; har commit par fsync nahi
     _db.executescript(_SCHEMA)
     _db.commit()
 

@@ -3,6 +3,7 @@ import asyncio
 import random
 import re
 import time
+from collections import deque
 
 import httpx
 
@@ -122,6 +123,27 @@ class DbApi:
         self.gate = asyncio.Semaphore(config.API_MAX_CONCURRENCY)   # ek saath kitne API calls
         self.pace_lock = asyncio.Lock()
         self.next_slot = 0.0
+        self.lat = {}                                # kind ("check"/"save") -> recent call timings
+
+    def _record(self, kind, secs, status):
+        d = self.lat.setdefault(kind, {"recent": deque(maxlen=500), "calls": 0, "429": 0, "5xx": 0})
+        d["recent"].append(secs)
+        d["calls"] += 1
+        d["429"] += status == 429
+        d["5xx"] += status >= 500
+
+    def latency_stats(self):
+        """Per-endpoint response time (seconds) over the last 500 calls: avg / p50 / p95 / max."""
+        out = {}
+        for kind, d in self.lat.items():
+            v = sorted(d["recent"])
+            if not v:
+                continue
+            out[kind] = {"calls": d["calls"], "429s": d["429"], "5xx": d["5xx"],
+                         "avg_s": round(sum(v) / len(v), 3), "p50_s": round(v[len(v) // 2], 3),
+                         "p95_s": round(v[min(len(v) - 1, int(len(v) * 0.95))], 3),
+                         "max_s": round(v[-1], 3)}
+        return out
 
     async def _pace(self):
         """Do API calls ke beech kam se kam API_MIN_INTERVAL seconds ka gap (saare workers + /submit milakar)."""
@@ -132,13 +154,22 @@ class DbApi:
         if start > now:
             await asyncio.sleep(start - now)
 
-    async def _send(self, client, method, url, tag, **kw):
+    async def _send(self, client, method, url, tag, kind="api", **kw):
         """Throttled HTTP call. 429 aaye to Retry-After (ya exponential backoff) ke baad dobara try."""
         r = None
         for attempt in range(1, config.API_429_RETRIES + 2):
+            await self._pace()                       # gate se pehle: slot pakad ke sleep na ho
             async with self.gate:
-                await self._pace()
-                r = await client.request(method, url, **kw)
+                t0 = time.monotonic()
+                try:
+                    r = await client.request(method, url, **kw)
+                except Exception:
+                    self._record(kind, time.monotonic() - t0, 599)
+                    raise
+                dt = time.monotonic() - t0
+            self._record(kind, dt, r.status_code)
+            if dt > config.API_SLOW_LOG:
+                log.warning("%s DB API %s slow: %.2fs (status %s)", tag, kind, dt, r.status_code)
             if r.status_code != 429 or attempt > config.API_429_RETRIES:
                 return r
             wait = _retry_after(r) or min(60, 2 ** attempt) + random.random()
@@ -185,9 +216,11 @@ class DbApi:
             used = self.token
             try:
                 if method == "GET":
-                    r = await self._send(client, "GET", url, tag, params=payload, headers=self._headers())
+                    r = await self._send(client, "GET", url, tag, kind="save", params=payload,
+                                         headers=self._headers())
                 else:
-                    r = await self._send(client, method, url, tag, json=payload, headers=self._headers())
+                    r = await self._send(client, method, url, tag, kind="save", json=payload,
+                                         headers=self._headers())
             except (httpx.TimeoutException, httpx.TransportError) as e:
                 raise ApiError(f"network: {e}")
             if r.status_code in (401, 403) and attempt == 1:
@@ -212,8 +245,8 @@ class DbApi:
         if email:
             payload["email"] = email
         try:
-            r = await self._send(client, "POST", config.DUPLICATE_CHECK_API_URL, tag, json=payload,
-                                 timeout=config.DUPLICATE_CHECK_TIMEOUT)
+            r = await self._send(client, "POST", config.DUPLICATE_CHECK_API_URL, tag, kind="check",
+                                 json=payload, timeout=config.DUPLICATE_CHECK_TIMEOUT)
         except (httpx.TimeoutException, httpx.TransportError) as e:
             raise ApiError(f"check API network: {e}")
         if r.status_code == 429:

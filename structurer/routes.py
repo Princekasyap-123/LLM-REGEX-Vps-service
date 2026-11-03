@@ -40,6 +40,20 @@ async def submit(req: SubmitReq, request: Request):
     return JSONResponse(status_code=code, content=body)
 
 
+class BatchReq(BaseModel):
+    items: list[SubmitReq]
+
+
+@router.post("/submit/batch", dependencies=[Depends(auth)])
+async def submit_batch(req: BatchReq, request: Request):
+    """Bahut saare raw texts ek call mein. Har item ka alag result, input ke order mein."""
+    if not req.items or len(req.items) > config.MAX_BATCH:
+        raise HTTPException(422, f"Send 1..{config.MAX_BATCH} items per call")
+    results = await pipeline.submit_many(request.app.state.client,
+                                         [(i.text, i.portal, i.createdBy) for i in req.items])
+    return {"count": len(results), "results": results}
+
+
 @router.post("/check", dependencies=[Depends(auth)])
 async def check(req: CheckReq, request: Request):
     """Phone aur/ya email bhejo: candidate pehle se parsed hai ya nahi (scrape se pehle bhi use kar sakte ho)."""
@@ -82,6 +96,7 @@ async def retry_failed():
 @router.get("/stats", dependencies=[Depends(auth)])
 async def stats():
     return {**store.stats_snapshot(), "ollama_keys": pool_stats(),
+            "db_api_latency": api.latency_stats(),
             "db_api_logged_in": bool(api.token), "server_time": int(time.time())}
 
 

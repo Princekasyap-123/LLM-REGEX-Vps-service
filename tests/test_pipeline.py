@@ -50,7 +50,9 @@ def run(coro):
     return asyncio.run(coro)
 
 
-def test_already_parsed_phone_is_not_queued(fake):
+def test_already_parsed_phone_is_not_queued(fake, monkeypatch):
+    from structurer import config
+    monkeypatch.setattr(config, "SUBMIT_API_CHECK", True)
     fake.known.add("9999368246")
     async def go():
         async with httpx.AsyncClient() as c:
@@ -169,7 +171,38 @@ def test_short_text_skipped(fake):
     assert store.rows("SELECT status FROM jobs")[0]["status"] == "skipped"
 
 
-def test_http_end_to_end(fake):
+def test_fast_intake_skips_api_check_but_worker_still_dedups(fake):
+    fake.known.add("9999368246")
+    async def go():
+        async with httpx.AsyncClient() as c:
+            code, body = await pipeline.submit_candidate(c, sample("ritesh.txt"), "recruiter.shine.com", 1)
+            assert code == 202 and fake.check_calls == 0      # submit par API call nahi
+            await pipeline.process(store.claim_job(), c)
+    run(go())
+    assert store.rows("SELECT status FROM jobs")[0]["status"] == "already_parsed" and fake.saved == []
+
+
+def test_batch_submit_and_latency_stats(fake):
+    hdr = {"x-api-key": "test-key"}
+    with TestClient(app) as client:
+        items = [{"text": sample("ritesh.txt"), "portal": "recruiter.shine.com"},
+                 {"text": sample("divay.txt"), "portal": "recruiter.shine.com"}]
+        r = client.post("/submit/batch", json={"items": items}, headers=hdr)
+        assert r.status_code == 200 and r.json()["count"] == 2
+        assert [x["http"] for x in r.json()["results"]] == [202, 202]
+        for _ in range(40):
+            if len(fake.saved) == 2:
+                break
+            time.sleep(0.25)
+        assert len(fake.saved) == 2
+        assert "db_api_latency" in client.get("/stats", headers=hdr).json()
+        store.run("DELETE FROM jobs")                  # lifespan DB shared hai: doosre tests ko saaf do
+        store.run("DELETE FROM seen_phones")
+
+
+def test_http_end_to_end(fake, monkeypatch):
+    from structurer import config
+    monkeypatch.setattr(config, "SUBMIT_API_CHECK", True)
     hdr = {"x-api-key": "test-key"}
     with TestClient(app) as client:
         assert client.post("/submit", json={"text": "x"}).status_code == 401
@@ -197,22 +230,33 @@ def test_http_end_to_end(fake):
         assert r.status_code == 200 and r.json()["status"] == "already_parsed"
 
 
-def test_save_says_already_exists_marks_already_parsed(fake):
+def _save_already_exists(fake, monkeypatch, confirmed):
     from structurer.dbapi import AlreadyExists
     async def exists_raises(client, payload, tag):
         raise AlreadyExists("User Already Exists")
-    api_save = api.save
-    api.save = exists_raises
-    try:
-        async def go():
-            async with httpx.AsyncClient() as c:
-                await pipeline.submit_candidate(c, sample("ritesh.txt"), "recruiter.shine.com", 1)
-                await pipeline.process(store.claim_job(), c)
-        run(go())
-    finally:
-        api.save = api_save
+    monkeypatch.setattr(api, "save", exists_raises)
+    calls = []
+    async def exists(client, phone, email, tag):       # 1st = worker precheck (not found), 2nd = confirm after save
+        calls.append(1)
+        return confirmed and len(calls) > 1
+    monkeypatch.setattr(api, "exists", exists)
+    async def go():
+        async with httpx.AsyncClient() as c:
+            await pipeline.submit_candidate(c, sample("ritesh.txt"), "recruiter.shine.com", 1)
+            await pipeline.process(store.claim_job(), c)
+    run(go())
+
+
+def test_save_says_already_exists_marks_already_parsed(fake, monkeypatch):
+    _save_already_exists(fake, monkeypatch, confirmed=True)
     assert store.rows("SELECT status FROM jobs")[0]["status"] == "already_parsed"
     assert store.seen_has("9999368246")
+
+
+def test_save_says_already_exists_but_check_disagrees_marks_failed(fake, monkeypatch):
+    _save_already_exists(fake, monkeypatch, confirmed=False)
+    assert store.rows("SELECT status FROM jobs")[0]["status"] == "failed"
+    assert not store.seen_has("9999368246")
 
 
 def test_no_phone_is_skipped_not_sent(fake):
@@ -222,3 +266,31 @@ def test_no_phone_is_skipped_not_sent(fake):
             await pipeline.process(store.claim_job(), c)
     run(go())
     assert store.rows("SELECT status FROM jobs")[0]["status"] == "skipped" and fake.saved == []
+
+
+def test_llm_check_mode_parser_job_skips_api_check(fake, monkeypatch):
+    from structurer import config
+    monkeypatch.setattr(config, "WORKER_API_CHECK", "llm")
+    async def go():
+        async with httpx.AsyncClient() as c:
+            await pipeline.submit_candidate(c, sample("ritesh.txt"), "recruiter.shine.com", 1)
+            before = fake.check_calls
+            await pipeline.process(store.claim_job(), c)
+            return fake.check_calls - before
+    assert run(go()) == 0                              # parser path: check API call nahi
+    assert store.rows("SELECT status, via FROM jobs")[0] == {"status": "done", "via": "parser"}
+
+
+def test_llm_check_mode_still_checks_before_llm(fake, monkeypatch):
+    from structurer import config
+    monkeypatch.setattr(config, "WORKER_API_CHECK", "llm")
+    fake.known.add("9999368246")
+    async def no_llm(*a, **k):
+        raise AssertionError("LLM must not run for a known duplicate")
+    monkeypatch.setattr(pipeline, "llm_structure", no_llm)
+    async def go():
+        async with httpx.AsyncClient() as c:
+            await pipeline.submit_candidate(c, sample("ritesh.txt"), "other-portal.com", 1)
+            await pipeline.process(store.claim_job(), c)
+    run(go())
+    assert store.rows("SELECT status FROM jobs")[0]["status"] == "already_parsed" and fake.saved == []

@@ -69,17 +69,27 @@ SENIORS_AUTH_PREFIX = _env("SENIORS_AUTH_PREFIX", "Bearer ", strip=False).strip(
 
 # ---- database API: duplicate check ----
 DUPLICATE_CHECK_API_URL = _get("DUPLICATE_CHECK_API_URL", "")   # public, no auth
-DUPLICATE_CHECK_TIMEOUT = _float("DUPLICATE_CHECK_TIMEOUT", 8)
+DUPLICATE_CHECK_TIMEOUT = _float("DUPLICATE_CHECK_TIMEOUT", 30)   # API measured: p50 ~6s, load par 15-30s
 CHECK_FAIL_OPEN = _bool("CHECK_FAIL_OPEN", False)
+# worker ka API duplicate check: "always" = har job se pehle (safe default); "llm" = sirf LLM call se
+# pehle, rule-parser wali jobs seedha save (save API duplicate reject karti hai) -> ~2x kam API calls
+WORKER_API_CHECK = _get("WORKER_API_CHECK", "always").lower()
 REQUIRE_PHONE = _bool("REQUIRE_PHONE", False)
 
 # ---- database API: throttling (429 se bachne ke liye; check + save + login sab par lagu) ----
-API_MAX_CONCURRENCY = _int("API_MAX_CONCURRENCY", 2)      # ek saath max itne API calls
-API_MIN_INTERVAL = _float("API_MIN_INTERVAL", 0.3)        # do API calls ke beech min gap (seconds)
+API_MAX_CONCURRENCY = _int("API_MAX_CONCURRENCY", 8)      # ek saath max itne API calls
+API_MIN_INTERVAL = _float("API_MIN_INTERVAL", 0.08)       # do API calls ke beech min gap (seconds)
 API_429_RETRIES = _int("API_429_RETRIES", 3)              # 429 par call ke andar hi itni baar dobara try
+API_SLOW_LOG = _float("API_SLOW_LOG", 3)                  # isse slow DB API call warning mein log
+
+# ---- intake ----
+# /submit par DB duplicate-check API ka round trip (intake slow karta hai). 0 = sirf local cache;
+# worker queue se uthate waqt API check phir bhi karta hai, to duplicate save nahi hota.
+MAX_BATCH = _int("MAX_BATCH", 200)                 # /submit/batch mein max items per call
+SUBMIT_API_CHECK = _bool("SUBMIT_API_CHECK", False)
 
 # ---- pipeline tuning ----
-WORKERS = _int("WORKERS", 4)
+WORKERS = _int("WORKERS", 8)
 MAX_ATTEMPTS = _int("MAX_ATTEMPTS", 4)
 MIN_TEXT_LEN = _int("MIN_TEXT_LEN", 200)
 RETENTION_DAYS = _int("RETENTION_DAYS", 7)
